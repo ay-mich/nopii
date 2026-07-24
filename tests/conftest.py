@@ -3,7 +3,11 @@ Pytest configuration and shared fixtures.
 """
 
 import pytest
-import pandas as pd
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None  # type: ignore[assignment]
 import tempfile
 from pathlib import Path
 
@@ -58,8 +62,10 @@ def custom_policy() -> Policy:
 
 
 @pytest.fixture
-def sample_dataframe() -> pd.DataFrame:
+def sample_dataframe():
     """Create a sample DataFrame with PII data."""
+    if pd is None:
+        pytest.skip("pandas is required for sample_dataframe fixture")
     return pd.DataFrame(
         {
             "name": ["John Doe", "Jane Smith", "Bob Johnson"],
