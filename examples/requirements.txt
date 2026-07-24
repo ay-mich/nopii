@@ -1,0 +1,5 @@
+# Core dependency (installed from local repository or PyPI)
+nopii
+
+# Additional dependencies for examples
+pandas

@@ -84,6 +84,9 @@ files = [
   "src/nopii/transforms/**/*.py",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"examples/*" = ["E402", "F841", "T201"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py312"
