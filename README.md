@@ -6,7 +6,7 @@
 
 A Python package for detecting, transforming, and auditing Personally Identifiable Information (PII) in your data. Supports multiple data sources including CSV, JSON, Parquet, and pandas DataFrames with policy-driven configuration.
 
-👉 Examples: [nopii-examples](https://github.com/ay-mich/nopii-examples)
+👉 Examples: [examples](./examples)
 
 ## Features
 
