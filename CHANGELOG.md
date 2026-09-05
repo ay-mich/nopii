@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-09-05
+
+### Fixed
+
+- Honor explicit zero confidence thresholds in core scanning.
+- Apply SDK confidence thresholds during scanning so findings, coverage, and metadata remain consistent.
+
+### Changed
+
+- Share detector-match normalization and coverage calculations across scan formats.
+- Support custom object detector matches in streaming scans.
+- Add regression coverage for thresholds, input formats, custom matches, and policy coverage.
+
 ## [0.1.0] - 2025-10-22
 
 ### Added
