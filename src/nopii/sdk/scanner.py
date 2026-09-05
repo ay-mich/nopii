@@ -50,15 +50,9 @@ class SDKScanner:
         Returns:
             ScanResult with detected PII
         """
-        result = self._scanner.scan_dataframe(df, dataset_name or "dataframe")
-
-        # Filter by confidence threshold
-        if confidence_threshold > 0:
-            result.findings = [
-                f for f in result.findings if f.confidence >= confidence_threshold
-            ]
-
-        return result
+        return self._scanner.scan_dataframe(
+            df, dataset_name or "dataframe", confidence_threshold
+        )
 
     def scan_text(
         self, text: str, confidence_threshold: float = 0.5
@@ -73,11 +67,7 @@ class SDKScanner:
         Returns:
             List of findings as dictionaries
         """
-        findings = self._scanner.scan_text(text)
-
-        # Filter by confidence threshold
-        if confidence_threshold > 0:
-            findings = [f for f in findings if f.confidence >= confidence_threshold]
+        findings = self._scanner.scan_text(text, confidence_threshold)
 
         # Convert to dictionaries for easier SDK usage
         return [
@@ -149,11 +139,7 @@ class SDKScanner:
         Returns:
             List of findings as dictionaries
         """
-        findings = self._scanner.scan_dict(data)
-
-        # Filter by confidence threshold
-        if confidence_threshold > 0:
-            findings = [f for f in findings if f.confidence >= confidence_threshold]
+        findings = self._scanner.scan_dict(data, confidence_threshold)
 
         # Convert to dictionaries for easier SDK usage
         return [

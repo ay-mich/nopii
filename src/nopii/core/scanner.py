@@ -4,11 +4,11 @@ Core scanner functionality for detecting PII in data.
 
 from __future__ import annotations
 
+import csv
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
-import csv
 
 try:  # optional pandas
     import pandas as pd
@@ -62,7 +62,7 @@ class Scanner:
         """
         start_time = time.time()
 
-        threshold = confidence_threshold or self.policy.thresholds["min_confidence"]
+        threshold = self._resolve_threshold(confidence_threshold)
         findings: List[Finding] = []
 
         if pd is None:
@@ -76,7 +76,7 @@ class Scanner:
             findings.extend(column_findings)
 
         # Calculate coverage score
-        coverage_score = self._calculate_coverage_score(findings, df, dataset_name)
+        coverage_score = self._calculate_coverage_score(findings, dataset_name)
 
         # Create scan metadata
         scan_metadata = {
@@ -113,52 +113,81 @@ class Scanner:
             if pd.isna(value) or value == "nan" or value.strip() == "":
                 continue
 
-            # Run all detectors on this value
-            ctx = {"column_name": column}
-            for detector in self.detector_registry.get_detectors():
-                matches = detector.find(value, ctx)
-
-                for match in matches:
-                    # Handle tuple format (start_pos, end_pos, confidence)
-                    if isinstance(match, tuple) and len(match) == 3:
-                        start_pos, end_pos, confidence = match
-                        if confidence >= threshold:
-                            detected_value = value[start_pos:end_pos]
-                            finding = Finding(
-                                type=detector.pii_type,
-                                value=detected_value,
-                                span=(start_pos, end_pos),
-                                column=column,
-                                row_index=row_idx,
-                                confidence=confidence,
-                                evidence=f"Detected by {detector.name} detector",
-                            )
-                            findings.append(finding)
-                    else:
-                        # Handle object format (for future compatibility)
-                        if (  # type: ignore[unreachable]
-                            hasattr(match, "confidence")
-                            and match.confidence >= threshold
-                        ):
-                            finding = Finding(
-                                type=detector.pii_type,
-                                value=match.value,
-                                span=match.span,
-                                column=column,
-                                row_index=row_idx,
-                                confidence=match.confidence,
-                                evidence=getattr(
-                                    match,
-                                    "evidence",
-                                    f"Detected by {detector.name} detector",
-                                ),
-                            )
-                            findings.append(finding)
+            findings.extend(
+                self._scan_value(
+                    value, threshold, column, row_idx, {"column_name": column}
+                )
+            )
 
         return findings
 
+    def _resolve_threshold(self, confidence_threshold: Optional[float]) -> float:
+        """Use the policy default only when no override was supplied."""
+        return (
+            self.policy.thresholds["min_confidence"]
+            if confidence_threshold is None
+            else confidence_threshold
+        )
+
+    def _scan_value(
+        self,
+        value: str,
+        threshold: float,
+        column: str,
+        row_index: int,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> List[Finding]:
+        """Run detectors and normalize their matches for every input format."""
+        findings: List[Finding] = []
+        for detector in self.detector_registry.get_detectors():
+            matches = (
+                detector.find(value)
+                if context is None
+                else detector.find(value, context)
+            )
+            for match in matches:
+                finding = self._finding_from_match(
+                    match, detector.pii_type, detector.name, value, column, row_index
+                )
+                if finding is not None and finding.confidence >= threshold:
+                    findings.append(finding)
+        return findings
+
+    @staticmethod
+    def _finding_from_match(
+        match: Any,
+        pii_type: str,
+        detector_name: str,
+        value: str,
+        column: str,
+        row_index: int,
+    ) -> Optional[Finding]:
+        """Support tuple matches and legacy objects at the detector boundary."""
+        evidence = f"Detected by {detector_name} detector"
+        if isinstance(match, tuple) and len(match) == 3:
+            start, end, confidence = match
+            detected_value = value[start:end]
+            span = (start, end)
+        elif hasattr(match, "confidence"):
+            confidence = match.confidence
+            detected_value = match.value
+            span = match.span
+            evidence = getattr(match, "evidence", evidence)
+        else:
+            return None
+
+        return Finding(
+            type=pii_type,
+            value=detected_value,
+            span=span,
+            column=column,
+            row_index=row_index,
+            confidence=confidence,
+            evidence=evidence,
+        )
+
     def _calculate_coverage_score(
-        self, findings: List[Finding], df: pd.DataFrame, dataset_name: str
+        self, findings: List[Finding], dataset_name: str
     ) -> float:
         """
         Calculate PII coverage score based on policy rules.
@@ -168,24 +197,11 @@ class Scanner:
         if not findings:
             return 1.0  # No PII detected = perfect coverage
 
-        # Count findings that would be protected by policy rules
-        protected_count = 0
-
-        for finding in findings:
-            # Check if this finding would be protected
-            if self._would_be_protected(finding, dataset_name):
-                protected_count += 1
-
-        # Add policy-declared PII fields (columns with explicit rules)
-        declared_fields = 0
-        for rule in self.policy.rules:
-            if rule.columns:
-                declared_fields += len(rule.columns)
-
-        total_pii_items = len(findings) + declared_fields
-        protected_items = protected_count + declared_fields
-
-        return protected_items / total_pii_items if total_pii_items > 0 else 1.0
+        protected_count = sum(
+            self._would_be_protected(finding, dataset_name) for finding in findings
+        )
+        declared_fields = sum(len(rule.columns or []) for rule in self.policy.rules)
+        return (protected_count + declared_fields) / (len(findings) + declared_fields)
 
     def _would_be_protected(self, finding: Finding, dataset_name: str) -> bool:
         """Check if a finding would be protected by policy rules."""
@@ -197,12 +213,7 @@ class Scanner:
         type_rule = self.policy.get_rule_for_type(finding.type)
         column_rule = self.policy.get_rule_for_column(finding.column)
 
-        # If there's a specific rule, it would be protected
-        if type_rule or column_rule:
-            return True
-
-        # No explicit rule -> treat as not protected for coverage purposes
-        return False
+        return bool(type_rule or column_rule)
 
     def scan_text(
         self, text: str, confidence_threshold: Optional[float] = None
@@ -217,47 +228,8 @@ class Scanner:
         Returns:
             List of findings
         """
-        threshold = confidence_threshold or self.policy.thresholds["min_confidence"]
-        findings: List[Finding] = []
-
-        for detector in self.detector_registry.get_detectors():
-            matches = detector.find(text)
-
-            for match in matches:
-                # Handle tuple format (start_pos, end_pos, confidence)
-                if isinstance(match, tuple) and len(match) == 3:
-                    start_pos, end_pos, confidence = match
-                    if confidence >= threshold:
-                        detected_value = text[start_pos:end_pos]
-                        finding = Finding(
-                            type=detector.pii_type,
-                            value=detected_value,
-                            span=(start_pos, end_pos),
-                            column="text",
-                            row_index=0,
-                            confidence=confidence,
-                            evidence=f"Detected by {detector.name} detector",
-                        )
-                        findings.append(finding)
-                else:
-                    # Handle object format (for future compatibility)
-                    if hasattr(match, "confidence") and match.confidence >= threshold:  # type: ignore[unreachable]
-                        finding = Finding(
-                            type=detector.pii_type,
-                            value=match.value,
-                            span=match.span,
-                            column="text",
-                            row_index=0,
-                            confidence=match.confidence,
-                            evidence=getattr(
-                                match,
-                                "evidence",
-                                f"Detected by {detector.name} detector",
-                            ),
-                        )
-                        findings.append(finding)
-
-        return findings
+        threshold = self._resolve_threshold(confidence_threshold)
+        return self._scan_value(text, threshold, "text", 0)
 
     def scan_text_result(
         self,
@@ -266,26 +238,10 @@ class Scanner:
         confidence_threshold: Optional[float] = None,
     ) -> ScanResult:
         """Scan text and return a ScanResult object for reporting."""
-        threshold = confidence_threshold or self.policy.thresholds["min_confidence"]
+        threshold = self._resolve_threshold(confidence_threshold)
         findings = self.scan_text(text, threshold)
 
-        # Compute coverage score similarly to dataframe path
-        if not findings:
-            coverage_score = 1.0
-        else:
-            protected_count = 0
-            for finding in findings:
-                if self._would_be_protected(finding, dataset_name):
-                    protected_count += 1
-            declared_fields = 0
-            for rule in self.policy.rules:
-                if rule.columns:
-                    declared_fields += len(rule.columns)
-            total_pii_items = len(findings) + declared_fields
-            protected_items = protected_count + declared_fields
-            coverage_score = (
-                protected_items / total_pii_items if total_pii_items > 0 else 1.0
-            )
+        coverage_score = self._calculate_coverage_score(findings, dataset_name)
 
         scan_metadata = {
             "scan_duration": 0.0,
@@ -325,7 +281,7 @@ class Scanner:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
 
-        threshold = confidence_threshold or self.policy.thresholds["min_confidence"]
+        threshold = self._resolve_threshold(confidence_threshold)
         findings: List[Finding] = []
         total_rows = 0
         total_columns = 1
@@ -336,34 +292,14 @@ class Scanner:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 for line_idx, line in enumerate(f):
                     line = line.rstrip("\n")
-                    # Use detectors directly for speed
-                    for detector in self.detector_registry.get_detectors():
-                        matches = detector.find(line)
-                        for match in matches:
-                            if isinstance(match, tuple) and len(match) == 3:
-                                s, e, conf = match
-                                if conf >= threshold:
-                                    findings.append(
-                                        Finding(
-                                            type=detector.pii_type,
-                                            value=line[s:e],
-                                            span=(s, e),
-                                            column="line",
-                                            row_index=line_idx,
-                                            confidence=conf,
-                                            evidence=f"Detected by {detector.name} detector",
-                                        )
-                                    )
+                    findings.extend(self._scan_value(line, threshold, "line", line_idx))
                     total_rows += 1
             total_columns = 1
         elif suffix == ".csv":
             with open(path, "r", encoding="utf-8", newline="") as f:
                 reader = csv.reader(f)
-                try:
-                    headers = next(reader)
-                except StopIteration:
-                    headers = []
-                total_columns = len(headers) if headers else 0
+                headers = next(reader, [])
+                total_columns = len(headers)
                 for row_idx, row in enumerate(reader):
                     # Track rows processed
                     total_rows += 1
@@ -373,48 +309,22 @@ class Scanner:
                             if col_idx < len(headers)
                             else f"col_{col_idx}"
                         )
-                        value = str(cell)
-                        ctx = {"column_name": column_name}
-                        for detector in self.detector_registry.get_detectors():
-                            matches = detector.find(value, ctx)
-                            for match in matches:
-                                if isinstance(match, tuple) and len(match) == 3:
-                                    s, e, conf = match
-                                    if conf >= threshold:
-                                        findings.append(
-                                            Finding(
-                                                type=detector.pii_type,
-                                                value=value[s:e],
-                                                span=(s, e),
-                                                column=column_name,
-                                                row_index=row_idx,
-                                                confidence=conf,
-                                                evidence=f"Detected by {detector.name} detector",
-                                            )
-                                        )
+                        findings.extend(
+                            self._scan_value(
+                                cell,
+                                threshold,
+                                column_name,
+                                row_idx,
+                                {"column_name": column_name},
+                            )
+                        )
         else:
             raise ValueError(
                 f"Unsupported file format for streaming scan: {suffix}. "
                 "Use SDKScanner (pandas) for JSON/Parquet."
             )
 
-        # Coverage score without full dataframe: mirror text path logic
-        if not findings:
-            coverage_score = 1.0
-        else:
-            protected_count = 0
-            for finding in findings:
-                if self._would_be_protected(finding, dataset_name):
-                    protected_count += 1
-            declared_fields = 0
-            for rule in self.policy.rules:
-                if rule.columns:
-                    declared_fields += len(rule.columns)
-            total_pii_items = len(findings) + declared_fields
-            protected_items = protected_count + declared_fields
-            coverage_score = (
-                protected_items / total_pii_items if total_pii_items > 0 else 1.0
-            )
+        coverage_score = self._calculate_coverage_score(findings, dataset_name)
 
         scan_metadata = {
             "scan_duration": time.time() - start_time,
@@ -449,7 +359,7 @@ class Scanner:
         Returns:
             List of findings
         """
-        threshold = confidence_threshold or self.policy.thresholds["min_confidence"]
+        threshold = self._resolve_threshold(confidence_threshold)
         findings: List[Finding] = []
 
         for key, value in data.items():
